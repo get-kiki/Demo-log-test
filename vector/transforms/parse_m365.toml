@@ -1,0 +1,87 @@
+# ตัวอย่าง input จริงจากข้อสอบ (Microsoft 365 Unified Audit Log ย่อ):
+# {
+#   "tenant":"demoB", "source":"m365", "event_type":"UserLoggedIn",
+#   "user":"bob@demo.local", "ip":"198.51.100.23",
+#   "status":"Success", "workload":"Exchange",
+#   "@timestamp":"2025-08-20T10:05:00Z"
+# }
+#
+# ต่างจาก aws/api ตรงที่ M365 UAL แยก "สำเร็จ/ล้มเหลว" ไว้ใน field status ต่างหาก
+# ไม่ได้ฝังไว้ในชื่อ event_type (เช่น UserLoggedIn เกิดได้ทั้งสำเร็จและล้มเหลว)
+# จึงต้องเช็ค status เพิ่มอีกชั้นหลังเดาจาก event_type แล้ว
+
+type            = "remap"
+inputs          = ["route_by_source.m365"]
+reroute_dropped = true
+source          = '''
+  .raw = encode_json(.)
+
+  ts_raw = ."@timestamp"
+  # เช็ค .tenant ด้วย — ดูเหตุผลเต็มที่ parse_api.toml (บั๊กจริงที่เจอ: event ที่
+  # ไม่มี tenant เคยผ่านมาถึง postgres sink แล้วพังแบบไม่เข้า dead-letter)
+  if ts_raw == null || .event_type == null || .tenant == null { abort }
+
+  .event_id      = uuid_v7()
+  .ts            = format_timestamp!(parse_timestamp!(to_string!(ts_raw), "%+"), "%+")
+  .ingested_at   = format_timestamp!(now(), "%+")
+  .source        = "m365"
+  .event_subtype = null
+
+  et = downcase(to_string(.event_type) ?? "")
+
+  # M365 Unified Audit Log ตั้งชื่อ event เป็น "UserLoggedIn" / "UserLoggedOut" —
+  # สังเกตว่าคำว่า "loggedin"/"loggedout" ไม่มี "login"/"logon"/"logout" อยู่เป็น
+  # substring ต่อเนื่องเลย (l-o-g-g-e-d-i-n ≠ l-o-g-i-n) เช็คแยกไว้ต่างหาก ไม่งั้น
+  # login/logout สำเร็จปกติจะตกไปกลุ่ม "alert" (severity 5) ทั้งที่ควรเป็น severity ต่ำ
+  is_loggedout = contains(et, "logout") || contains(et, "loggedout")
+  is_loggedin  = contains(et, "login") || contains(et, "logon") || contains(et, "loggedin")
+
+  .action = if contains(et, "fail") || contains(et, "denied") { "deny" }
+    else if is_loggedout { "logout" }
+    else if is_loggedin { "login" }
+    else if contains(et, "create") { "create" }
+    else if contains(et, "delete") { "delete" }
+    else { "alert" }
+
+  # ชั้นที่ 2: status ของ M365 เอง ชนะการเดาจาก event_type เสมอถ้าบอกว่าล้มเหลว
+  st = downcase(to_string(.status) ?? "")
+  if contains(st, "fail") {
+    .action = "deny"
+  }
+
+  # severity มา 2 ชั้น: (1) base ตาม action ที่เพิ่งแมปไว้ (2) keyword ที่สื่อความ
+  # อันตรายเฉพาะทาง สแกนทั้ง event_type และ status รวมกัน ชนะ base เสมอถ้าให้ค่า
+  # สูงกว่า — ดูรายละเอียดที่ parse_api.toml
+  base = if .action == "deny" { 6 }
+    else if .action == "delete" { 6 }
+    else if .action == "create" { 4 }
+    else if .action == "alert" { 5 }
+    else { 1 }
+
+  text = et + " " + st
+  floor = if contains(text, "ransomware") || contains(text, "malware") || contains(text, "exfiltrat") || contains(text, "breach") || contains(text, "compromis") || contains(text, "backdoor") || contains(text, "trojan") { 10 }
+    else if contains(text, "privilege") || contains(text, "escalat") || contains(text, "root") || contains(text, "superuser") || contains(text, "administrator") || contains(text, "unauthorized") || contains(text, "suspicious") || contains(text, "bruteforce") || contains(text, "exploit") || contains(text, "injection") || contains(text, "anomaly") { 8 }
+    else if contains(text, "credential") || contains(text, "password") || contains(text, "secret") || contains(text, "mfa") || contains(text, "apikey") || contains(text, "api_key") { 7 }
+    else if contains(text, "role") || contains(text, "policy") || contains(text, "permission") || contains(text, "iam") { 6 }
+    else { 0 }
+
+  .severity = if floor > base { floor } else { base }
+
+  .src_ip = .ip
+  .dst_ip = null
+
+  .attrs = {
+    "status":   .status,
+    "workload": .workload,
+  }
+
+  .tags = []
+
+  del(."@timestamp")
+  del(.ip)
+  del(.status)
+  del(.workload)
+  del(.received_at)
+  del(.source_hint)
+  del(.collector_ip)
+'''

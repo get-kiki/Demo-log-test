@@ -1,0 +1,50 @@
+# ============================================================
+# Caddyfile.saas — entrypoint เดียวของระบบ (โหมด SaaS/Cloud)
+# ============================================================
+# routing (handle blocks) เหมือน Caddyfile (appliance) ทุกตัว (รวม forward_auth
+# เช็ค API key ที่ /ingest) — ต่างกันจุดเดียวคือ TLS: ไฟล์นี้ใช้ domain จริงแทน bare ":443" ทำให้ Caddy
+# เปลี่ยนจาก "ออก cert เอง (internal CA)" เป็น "ขอ cert จาก Let's Encrypt
+# อัตโนมัติ" โดยอัตโนมัติ ไม่ต้องเขียน `tls` directive เองเลยด้วยซ้ำ
+#
+# ใช้กับ: docker compose -f docker-compose.yml -f docker-compose.saas.yml up -d
+# (docker-compose.saas.yml เป็นคนสั่งให้ caddy โหลดไฟล์นี้แทน Caddyfile.appliance
+# — ดูคอมเมนต์ที่นั่น)
+#
+# ต้องตั้งค่าใน .env ก่อนรัน (ดู .env.example หัวข้อ "SaaS mode only"):
+#   SAAS_DOMAIN=log.yourdomain.com   <- ต้องมี DNS A/AAAA record ชี้มาที่ IP
+#                                        ของ cloud VM นี้แล้วจริงๆ ก่อนรัน
+#                                        ไม่งั้น ACME HTTP-01 challenge จะ fail
+#   SAAS_ACME_EMAIL=you@example.com  <- Let's Encrypt ใช้แจ้งเตือนถ้า
+#                                        certificate ใกล้หมดอายุแล้วต่อไม่สำเร็จ
+{
+	# global option — ต้องอยู่นอก site block เสมอ (แตกต่างจาก tls ที่ผูกกับ
+	# แต่ละ site ได้) email นี้ผูกกับ "ACME account" ของ Let's Encrypt ไม่ใช่
+	# ของ site ใดที่หนึ่ง
+	email {$SAAS_ACME_EMAIL}
+}
+
+{$SAAS_DOMAIN} {
+	# ไม่มี `tls` directive เลยในนี้ — Caddy เห็นว่า address ข้างบนเป็นชื่อ
+	# domain จริง (ไม่ใช่ ":443" เฉยๆ แบบไฟล์ appliance) เลยเปิด "automatic
+	# HTTPS" ให้เองทั้งชุด: ขอ certificate จาก Let's Encrypt ผ่าน ACME
+	# HTTP-01 challenge, ต่ออายุอัตโนมัติก่อนหมดทุกครั้ง, และ redirect
+	# http -> https ให้เองด้วย (ไม่ต้องเขียน :80 { redir ... } แยกแบบไฟล์
+	# appliance เลย)
+
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	# เหมือน Caddyfile (appliance) เป๊ะ — เช็ค API key ผ่าน forward_auth ก่อน
+	# ปล่อยเข้า Vector เสมอ ดูเหตุผลเต็มๆ ที่ Caddyfile
+	handle /ingest* {
+		forward_auth api:3000 {
+			uri /internal/verify-key
+		}
+		reverse_proxy vector:8686
+	}
+
+	handle {
+		reverse_proxy frontend:5173
+	}
+}

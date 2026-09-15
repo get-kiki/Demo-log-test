@@ -1,1 +1,1 @@
-export { CanonicalEvent, SourceEnum } from "./schema.js";
+export { CanonicalEvent, SourceEnum, AlertCondition } from "./schema.js";

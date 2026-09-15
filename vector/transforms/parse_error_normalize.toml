@@ -1,0 +1,59 @@
+# รับ event ที่ parse ไม่ผ่านจากทุกเลน (.dropped) มาแปลงเป็นแถวที่ insert เข้า
+# ตาราง logs ได้จริง — เพราะ event ที่ drop คือตัวที่ field ไม่ครบตั้งแต่แรกอยู่
+# แล้ว ยัดตรงๆ เข้า postgres sink จะพังเพราะ column NOT NULL หลายตัวขาด
+#
+# ไม่ได้แทนที่ dead-letter ไฟล์เดิม — event เดียวกันนี้ยังไหลไปที่ sinks.dead_letter
+# (ไฟล์ .ndjson) พร้อมกันด้วย (fan-out จาก .dropped เดียวกัน) นี่แค่เป็นสำเนาย่อ
+# ให้ dashboard/Search มองเห็นได้ ไฟล์ยังเก็บ raw เต็มๆ เหมือนเดิมสำหรับ debug ลึก
+#
+# ตั้งใจใส่แค่ 3 อย่างที่ดึงมาจากข้อมูลจริงได้ (ts, attrs, raw) ที่เหลือเป็นค่า
+# คงที่ล้วนๆ — ไม่เดาเติม field ที่ไม่รู้จริง (เช่น src_ip/user) เพราะ event ที่
+# parse ไม่ผ่านไม่รู้ด้วยซ้ำว่า field พวกนั้นควรอ่านจากตรงไหน
+type   = "remap"
+inputs = [
+  "route_by_source._unmatched",
+  "decode_spool.dropped",
+  "parse_firewall.dropped",
+  "parse_network.dropped",
+  "parse_api.dropped",
+  "parse_crowdstrike.dropped",
+  "parse_aws.dropped",
+  "parse_m365.dropped",
+  "parse_ad.dropped",
+]
+source = '''
+  raw_snapshot = encode_json(.)
+
+  # ดึงออกมาก่อนเริ่มเขียนทับ field อื่น — .metadata.dropped.* เป็น field path
+  # ปกติที่ Vector แปะไว้ตอน reroute_dropped (ยืนยันแล้วด้วย vector test จริง
+  # ไม่ใช่ %dropped.* metadata accessor ตามที่เอกสารบางที่บอก)
+  dropped_by     = .metadata.dropped.component_id
+  dropped_reason = .metadata.dropped.reason
+
+  # decode_spool.dropped เกิดก่อนถึง envelope.toml เลยไม่มี .received_at
+  # (ทุกเลนอื่นผ่าน envelope มาก่อนจะไปถึง parse_X.dropped จึงมี received_at
+  # เสมอ) fallback เป็น now() เฉพาะเคสนั้น
+  .event_id = uuid_v7()
+  .ts = if exists(.received_at) { format_timestamp!(.received_at, "%+") } else { format_timestamp!(now(), "%+") }
+  .ingested_at = format_timestamp!(now(), "%+")
+
+  .tenant = if exists(.tenant) { to_string(.tenant) ?? "unknown" } else { "unknown" }
+
+  .source        = "parse_error"
+  .event_type    = "parse_error"
+  .event_subtype = null
+  .severity      = 5   # ปัญหาระบบ (data quality) ไม่ใช่ security event — ไม่ใช่ค่าที่วัดอันตรายจริง
+  .action        = "alert"
+  .src_ip        = null
+  .dst_ip        = null
+  .user          = null
+  .host          = null
+
+  .attrs = {
+    "dropped_by":     dropped_by,
+    "dropped_reason": dropped_reason,
+  }
+
+  .raw  = raw_snapshot
+  .tags = []
+'''

@@ -1,0 +1,17 @@
+# แยก event ออกเป็น 7 เลน ตาม source — ไม่แปลงข้อมูลใดๆ ในไฟล์นี้
+# แต่ละเลนจะถูกอ้างถึงจากไฟล์ parser ด้วยชื่อ "route_by_source.<ชื่อเลน>"
+#
+# หมายเหตุ: ชื่อไฟล์ต้องเป็น route_by_source.toml ให้ตรงกับชื่อที่ต้องการเป๊ะ
+# เพราะ Vector เดาชื่อ component จาก "ชื่อไฟล์" เวลาไฟล์อยู่ในโฟลเดอร์
+# transforms/ (ไม่ใช่จาก [transforms.xxx] ที่เคยเขียนกำกับไว้ในไฟล์แบบเดิม)
+
+type   = "route"
+inputs = ["envelope"]
+
+route.firewall    = '.source_hint == "firewall" || .source == "firewall"'
+route.network     = '.source_hint == "network"  || .source == "network"'
+route.api         = '.source == "api"'
+route.crowdstrike = '.source == "crowdstrike"'
+route.aws         = '.source == "aws"'
+route.m365        = '.source == "m365"'
+route.ad          = '.source == "ad"'

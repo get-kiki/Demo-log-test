@@ -1,0 +1,38 @@
+# รับ event จากทุก source มารวมกันที่นี่ก่อน — ยังไม่ parse เนื้อหา
+# หน้าที่เดียว: เติม received_at และเดา "แหล่งที่มา" ให้ event ที่ยังไม่รู้ตัวเอง
+# (พวก syslog ดิบ) เพื่อให้ route.toml ในสเต็ปถัดไปส่งไปถูกทาง
+#
+# หมายเหตุ: นี่คือการ "เดา" ไม่ใช่ข้อเท็จจริงที่ยืนยันได้ — ทั้งเนื้อหาข้อความและ
+# hostname เป็นค่าที่ตัวอุปกรณ์ต้นทางส่งมาบอกเราเอง ปลอม/เปลี่ยนได้ทั้งคู่
+# ถ้าต้องการความแน่นอนจริง ต้องเปลี่ยนไปผูกกับ collector_ip แทน (ดูใน docs/architecture.md
+# เรื่อง known limitations)
+
+type   = "remap"
+inputs = ["syslog_udp", "syslog_tcp", "http_ingest", "decode_spool"]
+source = '''
+  .received_at = now()
+
+  # event ที่มาจาก http_ingest / spool_files (JSON) มี .source ติดมาอยู่แล้ว
+  # เฉพาะ syslog ดิบ (.message เป็น text ล้วน) เท่านั้นที่ต้อง "เดา" จาก 2 สัญญาณ
+  if !exists(.source) {
+    msg = to_string(.message) ?? ""
+
+    # สัญญาณที่ 1: มี key เฉพาะของแต่ละประเภทอยู่ในเนื้อความไหม
+    looks_like_firewall = contains(msg, "action=")
+    looks_like_network  = contains(msg, "event=")
+
+    # สัญญาณที่ 2: hostname ที่แนบมาใน syslog header เข้าเค้ารูปแบบไหม (best-effort)
+    sys, sys_err = parse_syslog(msg)
+    hostname = if sys_err == null { to_string(sys.hostname) } else { "" }
+    hostname_says_firewall = match(hostname, r'^fw\d*$')
+    hostname_says_network  = match(hostname, r'^r\d+$')
+
+    if looks_like_firewall || hostname_says_firewall {
+      .source_hint = "firewall"
+    } else if looks_like_network || hostname_says_network {
+      .source_hint = "network"
+    } else {
+      .source_hint = "unknown"
+    }
+  }
+'''

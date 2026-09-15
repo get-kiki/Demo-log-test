@@ -1,0 +1,60 @@
+# ตัวอย่าง input จริงจากข้อสอบ (CrowdStrike sample JSON):
+# {
+#   "tenant":"demoA", "source":"crowdstrike", "event_type":"malware_detected",
+#   "host":"WIN10-01", "process":"powershell.exe", "severity":8,
+#   "sha256":"abc...", "action":"quarantine", "@timestamp":"2025-08-20T08:00:00Z"
+# }
+#
+# ต่างจาก api/aws/m365/ad: CrowdStrike (EDR) ส่ง severity และ action มาเองตรงๆ
+# ไม่ต้องเดาจาก event_type — หน้าที่ของ parser นี้แค่ "เชื่อฟัง" ค่าที่ส่งมา แต่
+# บังคับให้เข้ารูปที่ schema กลางยอมรับ (severity 0-10, action ตาม enum) เพราะ
+# action ดิบของ CrowdStrike (quarantine/kill_process/network_contain/…) ไม่ตรงกับ
+# enum ของเราสักคำ — เก็บค่าดิบไว้ใน attrs.action_raw ไม่ให้ข้อมูลเสียหายไปเฉยๆ
+
+type            = "remap"
+inputs          = ["route_by_source.crowdstrike"]
+reroute_dropped = true
+source          = '''
+  .raw = encode_json(.)
+
+  ts_raw = ."@timestamp"
+  # เช็ค .tenant ด้วย — ดูเหตุผลเต็มที่ parse_api.toml (บั๊กจริงที่เจอ: event ที่
+  # ไม่มี tenant เคยผ่านมาถึง postgres sink แล้วพังแบบไม่เข้า dead-letter)
+  if ts_raw == null || .event_type == null || .tenant == null { abort }
+
+  .event_id      = uuid_v7()
+  .ts            = format_timestamp!(parse_timestamp!(to_string!(ts_raw), "%+"), "%+")
+  .ingested_at   = format_timestamp!(now(), "%+")
+  .source        = "crowdstrike"
+  .event_subtype = null
+
+  # action ดิบของ CrowdStrike เป็นคำที่มัน "ทำจริง" (containment) ไม่ใช่ประเภท
+  # เหตุการณ์ — คำที่สื่อถึงการบล็อก/กักกันให้จัดเป็น deny ที่เหลือคือแค่ตรวจพบ (alert)
+  raw_action = downcase(to_string(.action) ?? "")
+  is_contained = contains(raw_action, "quarantine") || contains(raw_action, "block") || contains(raw_action, "kill") || contains(raw_action, "contain") || contains(raw_action, "isolat")
+  action_raw_out = .action
+  .action = if is_contained { "deny" } else { "alert" }
+
+  # CrowdStrike ให้ severity มาเองแล้ว (มาตราส่วนตรงกับ schema พอดี 0-10) เชื่อค่านี้
+  # แทนการเดา แค่กันกรณีต้นทางส่งค่านอกช่วงมา (VRL ไม่มีฟังก์ชัน clamp ในตัว)
+  sev = to_int(.severity) ?? 5
+  .severity = if sev < 0 { 0 } else if sev > 10 { 10 } else { sev }
+
+  .src_ip = null
+  .dst_ip = null
+
+  .attrs = {
+    "process":     .process,
+    "sha256":      .sha256,
+    "action_raw":  action_raw_out,
+  }
+
+  .tags = []
+
+  del(."@timestamp")
+  del(.process)
+  del(.sha256)
+  del(.received_at)
+  del(.source_hint)
+  del(.collector_ip)
+'''

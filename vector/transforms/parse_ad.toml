@@ -1,0 +1,72 @@
+# ตัวอย่าง input จริงจากข้อสอบ (Microsoft AD/Windows Security ย่อ, EventID 4625):
+# {
+#   "tenant":"demoA", "source":"ad", "event_id":4625, "event_type":"LogonFailed",
+#   "user":"demo\\eve", "host":"DC01", "ip":"203.0.113.77", "logon_type":3,
+#   "@timestamp":"2025-08-20T11:11:11Z"
+# }
+#
+# ระวัง: input มี field ชื่อ "event_id" (เลข Windows EventID เช่น 4625) ชนชื่อกับ
+# .event_id ของเรา (UUID ที่เป็น primary key ร่วมของตาราง logs) — ต้องดึงค่าเดิม
+# เก็บไว้ก่อน แล้วค่อยเขียนทับด้วย uuid_v7() ไม่งั้นเลข Windows EventID จะหายไปเลย
+
+type            = "remap"
+inputs          = ["route_by_source.ad"]
+reroute_dropped = true
+source          = '''
+  .raw = encode_json(.)
+
+  win_event_id = .event_id   # ดึงออกมาก่อนโดนเขียนทับด้านล่าง
+  ts_raw       = ."@timestamp"
+  # เช็ค .tenant ด้วย — ดูเหตุผลเต็มที่ parse_api.toml (บั๊กจริงที่เจอ: event ที่
+  # ไม่มี tenant เคยผ่านมาถึง postgres sink แล้วพังแบบไม่เข้า dead-letter)
+  if ts_raw == null || .event_type == null || .tenant == null { abort }
+
+  .event_id      = uuid_v7()
+  .ts            = format_timestamp!(parse_timestamp!(to_string!(ts_raw), "%+"), "%+")
+  .ingested_at   = format_timestamp!(now(), "%+")
+  .source        = "ad"
+  .event_subtype = null
+
+  # "LogonFailed" มีคำว่า fail อยู่แล้ว เข้าเงื่อนไขแรกพอดี ส่วน "Logon..." อื่นๆ
+  # (เช่น LogonSuccess) จะตกไปกลุ่ม login เพราะ contains(et, "logon")
+  et = downcase(to_string(.event_type) ?? "")
+  .action = if contains(et, "fail") || contains(et, "denied") { "deny" }
+    else if contains(et, "login") || contains(et, "logon") { "login" }
+    else if contains(et, "logout") { "logout" }
+    else if contains(et, "create") { "create" }
+    else if contains(et, "delete") { "delete" }
+    else { "alert" }
+
+  # severity มา 2 ชั้น: (1) base ตาม action ที่เพิ่งแมปไว้ (2) keyword ที่สื่อความ
+  # อันตรายเฉพาะทาง ชนะ base เสมอถ้าให้ค่าสูงกว่า — ดูรายละเอียดที่ parse_api.toml
+  base = if .action == "deny" { 6 }
+    else if .action == "delete" { 6 }
+    else if .action == "create" { 4 }
+    else if .action == "alert" { 5 }
+    else { 1 }
+
+  floor = if contains(et, "ransomware") || contains(et, "malware") || contains(et, "exfiltrat") || contains(et, "breach") || contains(et, "compromis") || contains(et, "backdoor") || contains(et, "trojan") { 10 }
+    else if contains(et, "privilege") || contains(et, "escalat") || contains(et, "root") || contains(et, "superuser") || contains(et, "administrator") || contains(et, "unauthorized") || contains(et, "suspicious") || contains(et, "bruteforce") || contains(et, "exploit") || contains(et, "injection") || contains(et, "anomaly") { 8 }
+    else if contains(et, "credential") || contains(et, "password") || contains(et, "secret") || contains(et, "mfa") || contains(et, "apikey") || contains(et, "api_key") { 7 }
+    else if contains(et, "role") || contains(et, "policy") || contains(et, "permission") || contains(et, "iam") { 6 }
+    else { 0 }
+
+  .severity = if floor > base { floor } else { base }
+
+  .src_ip = .ip
+  .dst_ip = null
+
+  .attrs = {
+    "win_event_id": win_event_id,
+    "logon_type":   .logon_type,
+  }
+
+  .tags = []
+
+  del(."@timestamp")
+  del(.ip)
+  del(.logon_type)
+  del(.received_at)
+  del(.source_hint)
+  del(.collector_ip)
+'''

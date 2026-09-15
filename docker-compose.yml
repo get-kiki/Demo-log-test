@@ -4,7 +4,11 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - "5432:5432"
+      # host ใช้ 5433 เพราะเครื่องนี้มี Postgres ตัวอื่นติดตั้งไว้บน Windows เอง
+      # แย่ง port 5432 ไปแล้ว (ไม่ใช่ container) — ข้างใน container ยังเป็น
+      # 5432 ตามปกติ ไม่กระทบ service อื่นที่ต่อกันผ่าน docker network ภายใน
+      # (Vector/backend/worker ใช้ hostname "postgres" ตรงๆ ไม่ผ่าน host port นี้เลย)
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/migrations:/docker-entrypoint-initdb.d:ro
@@ -21,13 +25,122 @@ services:
       postgres:
         condition: service_healthy
     env_file: .env
+    environment:
+      # Vector 0.57+ ปิด ${VAR} interpolation เป็น default (breaking change ด้าน
+      # security) sinks.toml ใช้ ${POSTGRES_URL} ต้องเปิดกลับมาเอง
+      VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION: "true"
     ports:
-      - "5514:5514/udp"
+      - "5514:5514/udp"   # syslog_udp — Caddy คุย HTTP ไม่ได้ ต้องเปิดตรงเสมอ
+      - "5514:5514/tcp"   # syslog_tcp — เหตุผลเดียวกัน
+      # 8686 (http_ingest) ปิดจากการ expose ตรงแล้ว — เข้าได้ทาง Caddy
+      # (https://.../ingest) เท่านั้น ยังต่อกันได้ปกติผ่าน docker network
+      # ภายใน (Caddy -> vector:8686) ไม่ต้อง publish ออก host
+      - "9598:9598"       # prometheus_exporter (/metrics) — ของ ops ใช้ scrape เอง ไม่ใช่ผู้ใช้ทั่วไป ปล่อยตรงไปก่อน
     volumes:
-      - ./vector/vector.toml:/etc/vector/vector.toml:ro
+      - ./vector:/etc/vector:ro
       - vector_data:/var/lib/vector
-    command: ["--config", "/etc/vector/vector.toml"]
+      # sources.spool_files (vector/sources.toml) เฝ้าดู /spool/*.ndjson ข้างใน
+      # container — ก่อนหน้านี้ path นี้ไม่ได้ผูกกับอะไรในเครื่องเราเลย ทำให้
+      # ช่องทาง "File batch" ที่ config ไว้ใช้งานจริงไม่ได้ (ไม่มีทางเอาไฟล์
+      # เข้าไปให้ Vector เห็น) — mount ./spool (host) เข้ากับ /spool (container)
+      # แบบ read-only เพราะ Vector แค่ "อ่าน" ไฟล์ ไม่เคยเขียนกลับเข้าโฟลเดอร์นี้
+      - ./spool:/spool:ro
+    command: ["--config-dir", "/etc/vector"]
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    # ไม่ publish port ตรงออก host แล้ว (เคย "3000:3000" ตรงๆ ไปก่อน) — ตอนนี้มี
+    # Caddy มาทำ reverse proxy /api/* -> api:3000 ผ่าน docker network ภายใน
+    # แล้ว (ดู Caddyfile) เข้าถึง api ได้ทาง https://.../api/* เท่านั้น
+    volumes:
+      # mount source ทับของที่ build ไว้ใน image — แก้โค้ดแล้ว tsx watch reload
+      # ทันที ไม่ต้อง `docker compose build` ใหม่ทุกครั้งที่แก้ backend
+      - ./backend/src:/app/backend/src:ro
+      - ./packages/shared/src:/app/packages/shared/src:ro
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      - ./worker/src:/app/worker/src:ro
+      - ./packages/shared/src:/app/packages/shared/src:ro
+
+  # fake SMTP server สำหรับ email alert channel — รับอีเมลทุกฉบับไว้ดูผ่านหน้าเว็บ
+  # (ไม่ได้ส่งออกไปจริง ไม่เช็ค auth เลย) เหมาะกับเดโม/dev ไม่ต้องมี SMTP account
+  # จริง ตอน production ค่อยเปลี่ยน SMTP_HOST/PORT/USER/PASS ใน .env ไปชี้ provider
+  # จริงแทนได้เลยโดยไม่ต้องแก้โค้ด worker (ดู worker/src/channels/email.ts)
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    restart: unless-stopped
+    ports:
+      - "8025:8025"   # web UI ดูอีเมลที่ "ส่งแล้ว" — เปิด https://.../  ไม่ได้ ต้องเข้าตรงพอร์ตนี้เท่านั้น (ยังไม่ได้ผูกกับ Caddy)
+      # ไม่ publish 1025 (SMTP) ออก host — worker ยิงเข้าผ่าน docker network
+      # ภายในด้วย hostname "mailhog" ตรงๆ ไม่มีใครนอก network ต้องต่อพอร์ตนี้เลย
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      # ต่างจาก POSTGRES_URL ที่ตรงกันข้าม backend/worker ต่อ postgres ผ่าน
+      # hostname ตรงๆ — ที่นี่ frontend เป็น dev server ที่ browser (นอก docker
+      # network) ต้องคุยด้วยผ่าน port ที่ map ออกมา proxy เลยต้องยิงกลับเข้า
+      # docker network ด้วยชื่อ service "api" แทน "localhost" (ดู vite.config.ts)
+      VITE_API_TARGET: http://api:3000
+    ports:
+      - "5173:5173"
+    volumes:
+      # mount แค่ src พอ เหมือน api/worker — index.html/config ไม่ค่อยเปลี่ยน
+      # ระหว่าง dev ถ้าจะแก้ต้อง rebuild image ใหม่
+      - ./frontend/src:/app/frontend/src:ro
+      - ./packages/shared/src:/app/packages/shared/src:ro
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - vector
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # mount ทั้ง 2 config ไว้เสมอ (คนละชื่อไฟล์ในคอนเทนเนอร์ ไม่ชนกัน) —
+      # ตัวที่ถูก "ใช้จริง" กำหนดจาก `command` ด้านล่าง ไม่ใช่จาก volumes นี้
+      # ออกแบบแบบนี้เพราะ docker compose รวมไฟล์ override แบบ append ลิสต์
+      # (ไม่ใช่แทนที่) ถ้า mount ทั้งคู่ไปที่ path เดียวกัน (/etc/caddy/Caddyfile)
+      # docker-compose.saas.yml จะชนกับอันนี้ทันที (duplicate mount point)
+      - ./Caddyfile:/etc/caddy/Caddyfile.appliance:ro
+      - ./Caddyfile.saas:/etc/caddy/Caddyfile.saas:ro
+      # เก็บ certificate ที่ CA ออกให้ไว้ข้าม restart — ไม่งั้น Caddy สร้าง CA
+      # ใหม่ (appliance) หรือขอ cert ใหม่จาก Let's Encrypt (saas) ทุกครั้งที่
+      # container ถูกสร้างใหม่ ทั้งที่ยัง valid อยู่
+      - caddy_data:/data
+      - caddy_config:/config
+    # default = appliance เสมอถ้ารันแค่ docker-compose.yml เฉยๆ (ไม่ผ่าน -f
+    # docker-compose.saas.yml) — โหมด saas จะ override บรรทัดนี้ทับ (ดู
+    # docker-compose.saas.yml)
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.appliance", "--adapter", "caddyfile"]
 
 volumes:
   pgdata:
   vector_data:
+  caddy_data:
+  caddy_config:

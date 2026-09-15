@@ -1,0 +1,86 @@
+# ตัวอย่าง input จริงจากข้อสอบ:
+# <134>Aug 20 12:44:56 fw01 vendor=demo product=ngfw action=deny src=10.0.1.10 \
+#   dst=8.8.8.8 spt=5353 dpt=53 proto=udp msg=DNS blocked policy=Block-DNS
+#
+# Mapping ตาม Schema กลาง (FullStack Inturn.pdf หัวข้อ 3): field ที่ไม่มีคอลัมน์
+# เฉพาะในตาราง logs (vendor/product/src_port/dst_port/protocol/rule_name) ถูกยุบ
+# รวมไว้ใน attrs โดยใช้ชื่อ key เดียวกับที่ข้อสอบตั้งไว้ — ไม่เสียข้อมูล แค่เก็บต่างที่
+
+type            = "remap"
+inputs          = ["route_by_source.firewall"]
+reroute_dropped = true
+source          = '''
+  sys = parse_syslog!(.message)
+
+  # parse_syslog ตีความ token แรกสุดหลัง hostname เป็น "appname" ตามธรรมเนียม
+  # BSD syslog (คาดว่าเป็น TAG[PID]:) แต่ log ของข้อสอบไม่มี appname จริง มีแต่
+  # key=value ต่อกันไปเรื่อยๆ ทำให้คู่แรก (vendor=demo) หลุดไปอยู่ sys.appname
+  # แทนที่จะอยู่ sys.message — ต้องต่อกลับก่อน parse_key_value ไม่งั้น field แรก
+  # ของทุก log หายไปเงียบๆ (เจอจริงจาก contract test: attrs.vendor ออกมา "unknown")
+  appname_part = if sys.appname == null { "" } else { to_string(sys.appname) }
+  kv, kv_err = parse_key_value(appname_part + " " + sys.message,
+    key_value_delimiter: "=",
+    field_delimiter: " ",
+    accept_standalone_key: true)
+  if kv_err != null { kv = {} }
+
+  .event_id      = uuid_v7()
+  .ts            = format_timestamp!(sys.timestamp, "%+")
+  .ingested_at   = format_timestamp!(now(), "%+")
+  .tenant        = if kv.tenant == null { "demoA" } else { kv.tenant }   # TODO: แทนด้วย IP-based enrichment table (step ความปลอดภัย)
+  .source        = "firewall"
+  .event_type    = "firewall_traffic"
+  .event_subtype = null
+
+  # action ต้องเป็นค่าใน enum ของข้อสอบเท่านั้น (allow|deny|create|delete|login|logout|alert)
+  # ห้ามปล่อยค่าดิบจาก vendor หลุดเข้ามาตรงๆ — ที่นี่ vendor ใช้คำเดียวกับ enum พอดีอยู่แล้ว
+  action_src = if kv.action == null { "" } else { kv.action }
+  raw_action = downcase!(action_src)
+  .action = if raw_action == "deny" { "deny" }
+    else if raw_action == "allow" { "allow" }
+    else { "other" }
+
+  .severity = if .action == "deny" { 5 }
+    else if .action == "allow" { 2 }
+    else {
+      # ไม่รู้ action แน่ชัด — ถอยไปใช้ severity ที่อุปกรณ์ส่งมาเองใน <134> แทนการเดามั่วๆ
+      sys_sev = to_string(sys.severity)
+      if sys_sev == "emergency" { 10 }
+      else if sys_sev == "alert" { 9 }
+      else if sys_sev == "critical" { 8 }
+      else if sys_sev == "error" { 7 }
+      else if sys_sev == "warning" { 6 }
+      else if sys_sev == "notice" { 5 }
+      else if sys_sev == "informational" { 3 }
+      else { 1 }
+    }
+
+  .src_ip = kv.src
+  .dst_ip = kv.dst
+  .host   = if sys.hostname == null { "unknown" } else { sys.hostname }
+  .user   = null
+
+  vendor_val  = if kv.vendor == null { "unknown" } else { kv.vendor }
+  product_val = if kv.product == null { "unknown" } else { kv.product }
+
+  .attrs = {
+    "vendor":    vendor_val,
+    "product":   product_val,
+    "src_port":  to_int(kv.spt) ?? null,
+    "dst_port":  to_int(kv.dpt) ?? null,
+    "protocol":  kv.proto,
+    "rule_name": kv.policy,
+  }
+
+  .raw = .message
+
+  # tag internal/external เป็นแค่ของเสริม — ใช้ฟอร์มไม่มี "!" เพื่อจับ error เอง
+  # ห้ามให้ tag พังแล้วทำให้ event ทั้งอันถูกส่งไป dead-letter ทั้งที่ข้อมูลหลักครบ
+  src_for_cidr = if kv.src == null { "0.0.0.0" } else { kv.src }
+  is_internal, ip_err = ip_cidr_contains("10.0.0.0/8", src_for_cidr)
+  .tags = if ip_err == null && is_internal { ["internal"] } else { ["external"] }
+
+  del(.message)
+  del(.source_hint)
+  del(.collector_ip)
+'''

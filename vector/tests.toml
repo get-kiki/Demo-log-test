@@ -1,0 +1,300 @@
+# ---------------------------------------------------------------------------
+# Contract test ระหว่าง Vector (VRL) กับ Zod schema (packages/shared/src/schema.ts)
+#
+# `vector test --config-dir vector` รันไฟล์นี้แบบ offline ล้วนๆ — ไม่ต้องมี
+# Postgres หรือ compose stack ทั้งชุด แค่ config เฉยๆ ก็รันได้ ปลอดภัยที่จะรัน
+# ใน CI ทุก commit
+#
+# แต่ละเทสยิง event เข้าไปที่ transform ต้นทาง (insert_at) ที่ "envelope" ซึ่ง
+# เป็นจุดแรกสุดของ pipeline แล้วไล่ผ่านของจริงทั้งสาย (envelope -> route_by_source
+# -> parse_X) ก่อนไปเช็คผลที่ transform ปลายทาง (extract_from) — ทดสอบทั้ง
+# pipeline ไม่ใช่แค่ parser เดี่ยวๆ ตัวอย่าง log ทุกอันคัดมาจาก FullStack
+# Inturn.pdf หัวข้อ 4 ตรงๆ (ตัวเดียวกับที่กรรมการจะใช้ตอน acceptance test)
+#
+# หมายเหตุ: เทสในไฟล์นี้เช็คแค่ field-by-field ด้วย VRL assertion (ฝั่ง Vector)
+# ส่วนขา Zod (ฝั่ง TypeScript) อยู่ใน /tests/contract/ — คนละสเต็ป เอาไว้ทำต่อ
+# ---------------------------------------------------------------------------
+
+# ============ 1) firewall — syslog raw, ผ่าน envelope guess + route ============
+
+[[tests]]
+name = "firewall: syslog deny -> normalize ครบ + tag internal"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "raw"
+value     = "<134>Aug 20 12:44:56 fw01 vendor=demo product=ngfw action=deny src=10.0.1.10 dst=8.8.8.8 spt=5353 dpt=53 proto=udp msg=DNS blocked policy=Block-DNS"
+
+[[tests.outputs]]
+extract_from = "parse_firewall"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.tenant, "demoA")
+  assert_eq!(.source, "firewall")
+  assert_eq!(.event_type, "firewall_traffic")
+  assert_eq!(.action, "deny")
+  assert_eq!(.severity, 5)
+  assert_eq!(.src_ip, "10.0.1.10")
+  assert_eq!(.dst_ip, "8.8.8.8")
+  assert_eq!(.host, "fw01")
+  assert_eq!(.attrs.rule_name, "Block-DNS")
+  assert_eq!(.attrs.vendor, "demo")
+  assert_eq!(.attrs.product, "ngfw")
+  assert!(includes!(.tags, "internal"))
+'''
+
+# ============ 2) network — syslog raw, event= แทน action= ============
+
+[[tests]]
+name = "network: link-down -> severity สูง + attrs ครบ"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "raw"
+value     = "<190>Aug 20 13:01:02 r1 if=ge-0/0/1 event=link-down mac=aa:bb:cc:dd:ee:ff reason=carrier-loss"
+
+[[tests.outputs]]
+extract_from = "parse_network"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.source, "network")
+  assert_eq!(.event_type, "link-down")
+  assert_eq!(.action, "alert")
+  assert_eq!(.severity, 7)
+  assert_eq!(.host, "r1")
+  assert_eq!(.attrs.mac, "aa:bb:cc:dd:ee:ff")
+  assert_eq!(.attrs.reason, "carrier-loss")
+  assert_eq!(.attrs."if", "ge-0/0/1")
+'''
+
+# ============ 3) api — JSON, POST /ingest ============
+
+[[tests]]
+name = "api: app_login_failed -> deny, severity 6"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "log"
+log_fields.tenant             = "demoA"
+log_fields.source             = "api"
+log_fields.event_type         = "app_login_failed"
+log_fields.user               = "alice"
+log_fields.ip                 = "203.0.113.7"
+log_fields.reason             = "wrong_password"
+log_fields."@timestamp"       = "2025-08-20T07:20:00Z"
+
+[[tests.outputs]]
+extract_from = "parse_api"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.tenant, "demoA")
+  assert_eq!(.action, "deny")
+  assert_eq!(.severity, 6)
+  assert_eq!(.src_ip, "203.0.113.7")
+  assert_eq!(.user, "alice")
+  assert_eq!(.attrs.reason, "wrong_password")
+'''
+
+# ============ 4) crowdstrike — JSON, เชื่อ severity/action ที่ส่งมาเอง ============
+
+[[tests]]
+name = "crowdstrike: malware_detected + quarantine -> deny, severity คงเดิม"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "log"
+log_fields.tenant       = "demoA"
+log_fields.source       = "crowdstrike"
+log_fields.event_type   = "malware_detected"
+log_fields.host         = "WIN10-01"
+log_fields.process      = "powershell.exe"
+log_fields.severity     = 8
+log_fields.sha256       = "abc..."
+log_fields.action       = "quarantine"
+log_fields."@timestamp" = "2025-08-20T08:00:00Z"
+
+[[tests.outputs]]
+extract_from = "parse_crowdstrike"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.action, "deny")
+  assert_eq!(.severity, 8)
+  assert_eq!(.host, "WIN10-01")
+  assert_eq!(.attrs.process, "powershell.exe")
+  assert_eq!(.attrs.action_raw, "quarantine")
+  assert_eq!(.attrs.sha256, "abc...")
+'''
+
+# ============ 5) aws — JSON, cloud.* ยุบเข้า attrs.cloud ============
+
+[[tests]]
+name = "aws: CreateUser -> action create, cloud.* ยกไป attrs"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "log"
+log_fields.tenant       = "demoB"
+log_fields.source       = "aws"
+log_fields.event_type   = "CreateUser"
+log_fields.user         = "admin"
+log_fields."@timestamp" = "2025-08-20T09:10:00Z"
+log_fields.cloud        = { service = "iam", account_id = "123456789012", region = "ap-southeast-1" }
+
+[[tests.outputs]]
+extract_from = "parse_aws"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.tenant, "demoB")
+  assert_eq!(.action, "create")
+  assert_eq!(.severity, 4)
+  assert_eq!(.user, "admin")
+  assert_eq!(.attrs.cloud.account_id, "123456789012")
+  assert_eq!(.attrs.cloud.region, "ap-southeast-1")
+  assert_eq!(.attrs.cloud.service, "iam")
+'''
+
+# ============ 6) m365 — JSON, จุดที่เคยมีบั๊ก "UserLoggedIn" ไม่เข้ากลุ่ม login ============
+# เทสนี้คือตัวที่จับบั๊กได้ตอนเขียน (ดูรายละเอียดใน parse_m365.toml) — ยืนยัน
+# พฤติกรรมที่ "ควรจะเป็น" ไว้กันไม่ให้กลับไปพังซ้ำ
+
+[[tests]]
+name = "m365: UserLoggedIn สำเร็จ -> action login, severity ต่ำ (ไม่ใช่ alert/5)"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "log"
+log_fields.tenant       = "demoB"
+log_fields.source       = "m365"
+log_fields.event_type   = "UserLoggedIn"
+log_fields.user         = "bob@demo.local"
+log_fields.ip           = "198.51.100.23"
+log_fields.status       = "Success"
+log_fields.workload     = "Exchange"
+log_fields."@timestamp" = "2025-08-20T10:05:00Z"
+
+[[tests.outputs]]
+extract_from = "parse_m365"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.tenant, "demoB")
+  assert_eq!(.action, "login")
+  assert_eq!(.severity, 1)
+  assert_eq!(.src_ip, "198.51.100.23")
+  assert_eq!(.attrs.status, "Success")
+  assert_eq!(.attrs.workload, "Exchange")
+'''
+
+# ============ 7) ad — JSON, event_id (Windows) ชนชื่อ .event_id (UUID) ============
+
+[[tests]]
+name = "ad: EventID 4625 LogonFailed -> deny, win_event_id เก็บรอด"
+
+[[tests.inputs]]
+insert_at = "envelope"
+type      = "log"
+log_fields.tenant       = "demoA"
+log_fields.source       = "ad"
+log_fields.event_id     = 4625
+log_fields.event_type   = "LogonFailed"
+log_fields.user         = 'demo\eve'
+log_fields.host         = "DC01"
+log_fields.ip           = "203.0.113.77"
+log_fields.logon_type   = 3
+log_fields."@timestamp" = "2025-08-20T11:11:11Z"
+
+[[tests.outputs]]
+extract_from = "parse_ad"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.action, "deny")
+  assert_eq!(.severity, 6)
+  assert_eq!(.host, "DC01")
+  assert_eq!(.src_ip, "203.0.113.77")
+  assert_eq!(.user, "demo\\eve")
+  assert_eq!(.attrs.win_event_id, 4625)
+  assert_eq!(.attrs.logon_type, 3)
+'''
+
+# ============ 8) dead-letter — field บังคับหาย ต้องไม่ทิ้ง event เงียบๆ ============
+# พิสูจน์ reroute_dropped: event ที่ไม่มี event_type (field บังคับของ lane api)
+# ต้อง "ไม่มี" output ปกติจาก parse_api เลย (no_outputs_from) แต่ต้องโผล่ที่
+# ทาง .dropped แทน
+#
+# หมายเหตุจากการรันจริง: ตอน abort() Vector จะ "ยกเลิก" การแก้ไขทั้งหมดที่ remap
+# นี้เพิ่งทำไป (รวมถึง .raw = encode_json(.) ที่ตั้งไว้ก่อน abort) แล้วส่ง event
+# ต้นฉบับล้วนๆ ไปที่ .dropped แทน ไม่ใช่ event ที่แก้ไปครึ่งทาง — ดีต่อการ debug
+# เพราะเห็นข้อมูลดิบเป๊ะๆ แต่แปลว่าเช็คได้แค่ field ที่มาจาก input เดิมเท่านั้น
+
+[[tests]]
+name = "api: ขาด event_type -> ไม่ผ่าน parse_api ปกติ ต้องไหลไป dead-letter"
+no_outputs_from = ["parse_api"]
+
+[[tests.inputs]]
+insert_at = "parse_api"
+type      = "log"
+log_fields.tenant       = "demoA"
+log_fields.source       = "api"
+log_fields."@timestamp" = "2025-08-20T07:20:00Z"
+
+[[tests.outputs]]
+extract_from = "parse_api.dropped"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  assert_eq!(.source, "api")
+  assert_eq!(.tenant, "demoA")
+  assert!(!exists(.event_type))
+  assert!(!exists(.severity))
+'''
+
+# ============ 9) parse_error_normalize — event ที่ dropped ต้องยัง insert เข้า logs ได้ ============
+# ทดสอบสาย parse_api (abort) -> .dropped -> parse_error_normalize ต่อเนื่องกัน
+# ในเทสเดียว — พิสูจน์ว่า event ที่ field ไม่ครบตั้งแต่ต้นจะไม่ทำให้ insert เข้า
+# ตาราง logs พัง (NOT NULL ครบทุกคอลัมน์) และยังสืบได้ว่า parser ไหนทำให้ drop
+
+[[tests]]
+name = "parse_error_normalize: event ที่ dropped ยัง insert เข้า logs ได้"
+
+[[tests.inputs]]
+insert_at = "parse_api"
+type      = "log"
+log_fields.tenant       = "demoA"
+log_fields.source       = "api"
+log_fields."@timestamp" = "2025-08-20T07:20:00Z"
+
+[[tests.outputs]]
+extract_from = "parse_error_normalize"
+
+[[tests.outputs.conditions]]
+type   = "vrl"
+source = '''
+  # เช็คทุกคอลัมน์ NOT NULL ของตาราง logs ให้ครบ ไม่ใช่แค่บาง field — บั๊กที่เจอ
+  # จริงตอน insert (ลืมใส่ .event_id) คือ field ที่เทสเดิมไม่ได้เช็คไว้เลย
+  assert!(is_string(.event_id))
+  assert!(is_string(.ts))
+  assert!(is_string(.ingested_at))
+  assert_eq!(.tenant, "demoA")
+  assert_eq!(.source, "parse_error")
+  assert_eq!(.event_type, "parse_error")
+  assert_eq!(.severity, 5)
+  assert_eq!(.action, "alert")
+  assert_eq!(.attrs.dropped_by, "parse_api")
+  assert_eq!(.attrs.dropped_reason, "abort")
+  assert!(exists(.raw))
+  assert_eq!(.tags, [])
+'''

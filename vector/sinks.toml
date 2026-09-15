@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# ปลายทางทั้งหมดของ pipeline อยู่ในไฟล์นี้ไฟล์เดียว — sources/transforms ไม่รู้จัก
+# และไม่ควรรู้จัก sink เลย (แยกหน้าที่เหมือนกับที่ sources.toml แยกจาก transforms)
+# ---------------------------------------------------------------------------
+
+# event ที่ parse ผ่านแล้วจากทั้ง 7 เลน + event ที่ parse ไม่ผ่าน (แปลงร่างแล้ว
+# โดย parse_error_normalize ให้มี field ครบพอ insert ได้) ไปที่ตาราง logs ตัวเดียว
+# postgres sink แปลง event เป็น JSON แล้วใช้ jsonb_populate_recordset ของ postgres
+# แมป field -> column ด้วยชื่อที่ตรงกัน (event_id, ts, tenant, attrs, tags, ...)
+# ทุก parser ตั้งชื่อ field ให้ตรงกับ column ใน db/migrations/001_init.sql อยู่แล้ว
+[sinks.postgres_logs]
+type   = "postgres"
+inputs = [
+  "parse_firewall",
+  "parse_network",
+  "parse_api",
+  "parse_crowdstrike",
+  "parse_aws",
+  "parse_m365",
+  "parse_ad",
+  "parse_error_normalize",
+]
+endpoint = "${POSTGRES_URL}"
+table    = "logs"
+
+# default ของ Vector คือ buffer แบบ "memory" (RAM) — เร็วดี แต่ event ที่ยังค้าง
+# รอเขียนเข้า postgres ตอน container นี้โดน restart/crash จะหายไปเลย เปลี่ยนเป็น
+# "disk" ให้ event ที่ค้างอยู่ถูกเขียนลงไฟล์ก่อน (ใน data_dir ที่ตั้งไว้ใน
+# vector.toml คือ /var/lib/vector — โฟลเดอร์เดียวกับที่ volume vector_data mount
+# ไว้อยู่แล้ว ไม่ต้องเพิ่ม volume ใหม่) พอ Vector เริ่มใหม่ก็อ่านต่อจากไฟล์ได้
+# ไม่ต้องรอ Postgres ตอบเร็วเท่า RAM แต่แลกมาด้วยว่า restart บ่อยๆ ตอน dev
+# (ที่เจอบ่อยกว่า production) ไม่เสีย event ทิ้งไปฟรีๆ
+#
+# max_size ต่ำสุดที่ Vector ยอมรับคือ 268435488 ไบต์ (256 MiB) — ตั้งค่าต่ำสุดไว้
+# พอสำหรับ scale เดโมนี้ ไม่ต้องคิดเผื่อเยอะ
+[sinks.postgres_logs.buffer]
+type       = "disk"
+max_size   = 268435488
+when_full  = "block"
+
+# insert เข้า postgres เป็นก้อนละ 20 event หรือรอไม่เกิน 10ms (ตัวไหนถึงก่อนคือ
+# flush) แทนที่จะปล่อยเป็น default ของ Vector เอง (~10MB/1s) — เหตุผล: default
+# เดิมรอนานเกินไปกว่าจะ flush ตอน event มาไม่ถี่พอ (เช่นเดโมที่ยิงเข้ามาทีละ
+# ไม่กี่ event) ทำให้เห็นผลใน dashboard ช้า ค่า 20/10ms นี้ยังคง trade-off เดิม
+# ไว้ (event ผิดรูป 1 ตัวใน batch ทำให้ทั้ง batch พังได้ ตามที่เอกสาร Vector
+# เตือนไว้) แค่ยอมรับความเสี่ยงนี้แลกกับ throughput/latency ที่ดีกว่า max_events=1
+[sinks.postgres_logs.batch]
+max_events   = 20
+timeout_secs = 0.01
+
+# event ที่ parser ใดๆ ทำไม่สำเร็จ (abort / parse_syawdslog! ล้มเหลว ฯลฯ) ต้องไม่หาย
+# เก็บลง /var/lib/vector (volume vector_data เดิมที่มีอยู่แล้วใน docker-compose)
+# เพื่อไล่ดูย้อนหลังได้ว่า source ไหนส่งข้อมูลเพี้ยนมา
+[sinks.dead_letter]
+type           = "file"
+inputs         = [
+  "route_by_source._unmatched",
+  "decode_spool.dropped",
+  "parse_firewall.dropped",
+  "parse_network.dropped",
+  "parse_api.dropped",
+  "parse_crowdstrike.dropped",
+  "parse_aws.dropped",
+  "parse_m365.dropped",
+  "parse_ad.dropped",
+]
+path           = "/var/lib/vector/dead-letter/%Y-%m-%d.ndjson"
+encoding.codec = "json"
+
+# expose /metrics ให้ scrape ได้ (bonus: Observability) — ใช้ internal_metrics_source
+# ที่ประกาศไว้ล่วงหน้าใน sources.toml แล้ว
+[sinks.prometheus]
+type    = "prometheus_exporter"
+inputs  = ["internal_metrics_source"]
+address = "0.0.0.0:9598"

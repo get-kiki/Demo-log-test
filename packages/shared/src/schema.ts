@@ -52,3 +52,23 @@ export const CanonicalEvent = z.object({
 });
 
 export type CanonicalEvent = z.infer<typeof CanonicalEvent>;
+
+/**
+ * รูปร่างของ alert_rules.condition (JSONB) — ทั้ง backend (validate ตอน
+ * POST/PATCH /rules) และ worker (validate ตอนอ่าน rule มาประเมินผล) ต้องเชื่อ
+ * สัญญาเดียวกันนี้ ไม่งั้น backend ยอมให้ rule รูปร่างหนึ่งผ่าน แต่ worker คาด
+ * หวังอีกรูปร่างหนึ่ง แล้ว evaluator พังเงียบๆ
+ *
+ * group_by จำกัดเป็น enum ของคอลัมน์ที่อนุญาตเท่านั้น — worker เอาค่านี้ไปต่อ
+ * เป็น SQL "GROUP BY <column>" ตรงๆ ถ้าไม่ล็อกด้วย enum ตรงนี้ admin ที่สร้าง
+ * rule เองก็ยัด SQL injection ผ่านช่องนี้ได้
+ */
+export const AlertCondition = z.object({
+  action: z.string().optional(),
+  event_type_contains: z.string().optional(),
+  window_minutes: z.number().int().min(1).max(1440),
+  threshold: z.number().int().min(1),
+  group_by: z.array(z.enum(["src_ip", "user", "host", "event_type", "source"])).min(1),
+});
+
+export type AlertCondition = z.infer<typeof AlertCondition>;

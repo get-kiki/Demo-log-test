@@ -1,0 +1,6 @@
+# Global options only. Everything else (sources/transforms/sinks) lives in its
+# own file under this directory and is merged in by `--config-dir`.
+data_dir = "/var/lib/vector"
+
+[api]
+enabled = false

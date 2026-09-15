@@ -22,6 +22,17 @@ dist-ssr
 vector_data/
 pgdata/
 
+# spool/ = bind mount ของ sources.spool_files (File batch ingestion) — ไฟล์
+# .ndjson ที่ generate มาทดสอบไม่ใช่ของที่ควร commit (มี timestamp ปัจจุบัน
+# เปลี่ยนทุกครั้งที่ generate ใหม่) เก็บแค่โฟลเดอร์ไว้ด้วย .gitkeep
+spool/*.ndjson
+!spool/.gitkeep
+
+# ไฟล์ที่ `make trust-cert` ดึงออกมาจาก container — เปลี่ยนทุกครั้งที่ caddy_data
+# volume ถูกสร้างใหม่ (internal CA คนละตัวต่อการติดตั้งแต่ละเครื่อง) ไม่ใช่
+# ของที่ควร commit ไว้ใน repo
+caddy-root-ca.crt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

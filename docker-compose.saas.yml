@@ -1,0 +1,20 @@
+# ============================================================
+# docker-compose.saas.yml — override สำหรับโหมด SaaS/Cloud
+# ============================================================
+# ใช้คู่กับไฟล์หลักเสมอ ไม่ใช้เดี่ยวๆ:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.saas.yml up -d
+#
+# service อื่นทั้งหมด (postgres, vector, api, worker, frontend) เหมือนเดิม
+# ทุกตัว — โหมด SaaS ต่างจาก Appliance อยู่จุดเดียวคือ Caddy ต้องขอ cert จาก
+# Let's Encrypt แทนที่จะออกเองแบบ self-signed จึงต้อง override แค่ service นี้
+
+services:
+  caddy:
+    # ต้องมี SAAS_DOMAIN / SAAS_ACME_EMAIL ให้ Caddyfile.saas อ่านผ่าน
+    # {$SAAS_DOMAIN} / {$SAAS_ACME_EMAIL} — ตั้งค่าไว้ใน .env (ดู .env.example)
+    env_file: .env
+    # สลับจาก Caddyfile.appliance (default ใน docker-compose.yml) มาเป็น
+    # Caddyfile.saas — ทั้งสองไฟล์ถูก mount ไว้อยู่แล้วเสมอจาก docker-compose.yml
+    # ตัวนี้แค่เปลี่ยนว่า caddy จะ "run" อันไหน
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.saas", "--adapter", "caddyfile"]

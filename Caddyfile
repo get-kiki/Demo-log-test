@@ -1,0 +1,66 @@
+# ============================================================
+# Caddyfile — entrypoint เดียวของระบบ (โหมด Appliance)
+# ============================================================
+# หน้าที่ตอนนี้: TLS termination + reverse proxy ไปยัง 3 service ข้างใน
+# docker network (api, vector, frontend) + forward_auth เช็ค API key ที่
+# /ingest ก่อนปล่อยเข้า Vector (ดู handle /ingest* ด้านล่าง กับ
+# backend/src/routes/internal.ts)
+#
+# โหมด SaaS (domain จริง + Let's Encrypt อัตโนมัติ) จะเป็นไฟล์ override แยก
+# ต่างหาก (docker-compose.saas.yml + Caddyfile.saas) เพราะต้องเปลี่ยนแค่บรรทัด
+# `tls internal` เป็นชื่อ domain จริงเท่านั้น ที่เหลือ handle blocks เหมือนเดิม
+# ทุกตัว — ยังไม่เขียนตอนนี้ เก็บไว้ตอนถึงสเต็ป deploy SaaS จริง
+
+# redirect http -> https เสมอ (ข้อสอบข้อ 2.2 "TLS: เปิดใช้งาน HTTPS อย่างน้อย
+# ในโหมด SaaS" — appliance ก็ทำด้วยเลยเพื่อความสม่ำเสมอ ไม่ต้องมี 2 พฤติกรรม
+# ต่างกันระหว่างโหมด)
+:80 {
+	redir https://{host}{uri} permanent
+}
+
+:443 {
+	# ออก certificate เองแบบ self-signed จาก internal CA ของ Caddy (ข้อสอบ
+	# อนุญาตไว้ตรงๆ: "Self-signed รับได้ถ้าอธิบายขั้นตอนชัดเจน") ไม่ต้องมี
+	# domain จริงหรือ Let's Encrypt สำหรับโหมด appliance — browser จะเตือน
+	# "ไม่ปลอดภัย" ครั้งแรกจนกว่าจะ trust cert ของ CA นี้เอง (วิธี trust อยู่ใน
+	# docs/setup_appliance.md ที่จะเขียนต่อไป)
+	#
+	# on_demand จำเป็นเพราะ block นี้เป็น bare ":443" ไม่ผูกกับ hostname ใดๆ
+	# ล่วงหน้า (เครื่อง appliance ไม่รู้ล่วงหน้าว่าใครจะเข้าผ่านชื่ออะไร —
+	# localhost, IP วงแลน, หรือ hostname ที่ตั้งเอง) ถ้าไม่เปิด on_demand
+	# Caddy จะไม่มี certificate ให้ SNI ไหนเลยและปฏิเสธ handshake ทันที (เจอ
+	# จริงตอนทดสอบ: "no certificate available for 'caddy'") on_demand ของ
+	# internal issuer ปลอดภัยที่จะเปิดแบบไม่ต้องมี "ask" endpoint กำกับ เพราะ
+	# ออก cert จาก CA ของเราเอง ไม่ใช่ ACME ที่ต้องกันคนขอ domain มั่ว
+	tls internal {
+		on_demand
+	}
+
+	# /api/* -> backend Fastify ทั้งหมด (auth, search, stats, rules, alerts)
+	handle /api/* {
+		reverse_proxy api:3000
+	}
+
+	# /ingest* -> เช็ค API key ก่อนด้วย forward_auth แล้วค่อยปล่อยเข้า Vector
+	# http_ingest — forward_auth ยิง sub-request (คัดลอก header เดิมของ client
+	# ไปด้วย รวมถึง X-Api-Key) ไปหา uri ที่ระบุที่ upstream (api:3000) ก่อนเสมอ
+	# ถ้า response เป็น 2xx (verify-key ตอบ 204) ถึงจะปล่อยให้ตกลงไปโดน
+	# reverse_proxy บรรทัดถัดไป ถ้าไม่ใช่ 2xx (verify-key ตอบ 401) Caddy ส่ง
+	# status/response เดิมนั้นกลับให้ client ทันที ไม่ยิงต่อไป Vector เลย —
+	# แปลว่าคนที่ไม่มี key ที่ถูกต้อง (หรือไม่ส่ง X-Api-Key มาเลย) ไม่มีทางทำให้
+	# event หลุดเข้า pipeline ได้อีกต่อไป
+	handle /ingest* {
+		forward_auth api:3000 {
+			uri /internal/verify-key
+		}
+		reverse_proxy vector:8686
+	}
+
+	# ทุกอย่างที่เหลือ -> frontend (ตอนนี้คือ Vite dev server ที่ port 5173
+	# ในเครือข่าย docker ไม่ใช่ static build — จะสลับเป็น `vite build` +
+	# serve static ไฟล์ตรงจาก Caddy เองตอนถึงสเต็ป production hardening
+	# ปล่อยเป็น reverse_proxy ไปก่อนเพราะยังต้องการ HMR ระหว่าง dev)
+	handle {
+		reverse_proxy frontend:5173
+	}
+}

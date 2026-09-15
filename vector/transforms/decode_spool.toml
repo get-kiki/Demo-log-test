@@ -1,0 +1,11 @@
+# sources.spool_files (type = "file") อ่านไฟล์ .ndjson ได้แค่ข้อความดิบทีละ
+# บรรทัดเป็น .message — ต่างจาก http_ingest ที่มี decoding.codec="json" ให้ใช้
+# ในตัว ที่นี่เลยต้อง parse_json เองก่อนส่งต่อให้ envelope.toml ซึ่งคาดหวังว่า
+# event จาก batch/API จะมี field ที่ parse แล้ว (.source, .tenant, ...) อยู่แล้ว
+
+type            = "remap"
+inputs          = ["spool_files"]
+reroute_dropped = true
+source          = '''
+  . = parse_json!(.message)
+'''

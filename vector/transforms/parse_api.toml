@@ -1,0 +1,78 @@
+# ตัวอย่าง input จริงจากข้อสอบ (POST /ingest):
+# {
+#   "tenant":"demoA", "source":"api", "event_type":"app_login_failed",
+#   "user":"alice", "ip":"203.0.113.7", "reason":"wrong_password",
+#   "@timestamp":"2025-08-20T07:20:00Z"
+# }
+#
+# /ingest เป็นช่องทางกลางให้แอปไหนก็ยิง JSON เข้ามาได้ ไม่ใช่ vendor เดียวแบบ
+# firewall/network ที่ field คงที่ตายตัว — event_type และ field เสริมเปลี่ยนไปตาม
+# แอปต้นทาง จึงต้องมี default ที่ปลอดภัยสำหรับทุก field ที่ไม่บังคับ field ที่
+# บังคับจริงมีแค่ tenant (มาจาก route แล้ว), event_type, @timestamp — ขาดตัวใด
+# ตัวหนึ่งคือ query/join อะไรต่อไม่ได้เลย จึง abort ให้ตกไป dead-letter แทนที่จะ
+# ปล่อยแถวพังเข้า DB
+
+type            = "remap"
+inputs          = ["route_by_source.api"]
+reroute_dropped = true
+source          = '''
+  # เก็บ payload ดิบก่อนแตะต้องอะไรทั้งนั้น ให้ .raw เป็นสำเนาต้นฉบับจริงๆ
+  .raw = encode_json(.)
+
+  ts_raw = ."@timestamp"
+  # .tenant ต้องเช็คด้วย ไม่ใช่แค่ ts/event_type — เดิมไม่เช็ค ทำให้ event ที่ไม่มี
+  # tenant ผ่านมาถึง postgres sink ได้ปกติ แล้วไปชน NOT NULL constraint ที่นั่น
+  # แทน ซึ่งไม่ถูก reroute เข้า dead-letter เลยเพราะ error เกิดที่ sink ไม่ใช่ที่
+  # transform นี้ — event หายไปเงียบๆ จริง (เจอบั๊กนี้จริงตอนทดสอบ)
+  if ts_raw == null || .event_type == null || .tenant == null { abort }
+
+  .event_id      = uuid_v7()
+  .ts            = format_timestamp!(parse_timestamp!(to_string!(ts_raw), "%+"), "%+")
+  .ingested_at   = format_timestamp!(now(), "%+")
+  .source        = "api"
+  .event_subtype = null
+
+  # ต้นทางไม่ส่ง action มาตรงๆ (ไม่มี field ชื่อนี้ในสัญญา) เดาจากชื่อ event_type แทน
+  # เช็ค fail/denied ก่อนเสมอ เพราะเจาะจงกว่า login/logout — ไม่งั้น "login_failed"
+  # จะถูกจัดเป็น "login" (เหมือนสำเร็จ) ทั้งที่ควรเป็น "deny"
+  et = downcase(to_string(.event_type) ?? "")
+  .action = if contains(et, "fail") || contains(et, "denied") { "deny" }
+    else if contains(et, "login") || contains(et, "logon") { "login" }
+    else if contains(et, "logout") { "logout" }
+    else if contains(et, "create") { "create" }
+    else if contains(et, "delete") { "delete" }
+    else { "alert" }
+
+  # severity มา 2 ชั้น: (1) base ตาม action ที่เพิ่งแมปไว้ (2) keyword ที่สื่อความ
+  # อันตรายเฉพาะทาง (ไม่ผูกกับ action enum เลย) ชนะ base เสมอถ้าให้ค่าสูงกว่า —
+  # กันไม่ให้เหตุการณ์อันตรายจริงๆ ที่บังเอิญไม่เข้า action enum ถูกจัดเป็น severity ต่ำ
+  base = if .action == "deny" { 6 }
+    else if .action == "delete" { 6 }
+    else if .action == "create" { 4 }
+    else if .action == "alert" { 5 }   # ไม่รู้จัก event_type เลย ไม่ควรเดาว่าไม่อันตราย
+    else { 1 }                         # login / logout / allow
+
+  floor = if contains(et, "ransomware") || contains(et, "malware") || contains(et, "exfiltrat") || contains(et, "breach") || contains(et, "compromis") || contains(et, "backdoor") || contains(et, "trojan") { 10 }
+    else if contains(et, "privilege") || contains(et, "escalat") || contains(et, "root") || contains(et, "superuser") || contains(et, "administrator") || contains(et, "unauthorized") || contains(et, "suspicious") || contains(et, "bruteforce") || contains(et, "exploit") || contains(et, "injection") || contains(et, "anomaly") { 8 }
+    else if contains(et, "credential") || contains(et, "password") || contains(et, "secret") || contains(et, "mfa") || contains(et, "apikey") || contains(et, "api_key") { 7 }
+    else if contains(et, "role") || contains(et, "policy") || contains(et, "permission") || contains(et, "iam") { 6 }
+    else { 0 }
+
+  .severity = if floor > base { floor } else { base }
+
+  .src_ip = .ip
+  .dst_ip = null
+
+  .attrs = {
+    "reason": .reason,
+  }
+
+  .tags = []
+
+  del(."@timestamp")
+  del(.ip)
+  del(.reason)
+  del(.received_at)
+  del(.source_hint)
+  del(.collector_ip)
+'''

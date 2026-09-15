@@ -1,0 +1,42 @@
+#รับ log เข้ามา 4 ช่องทาง
+[sources.syslog_udp]
+type       = "socket"
+mode       = "udp"
+address    = "0.0.0.0:5514"
+host_key   = "collector_ip"   # เก็บ IP เครื่องที่ส่งมา ใช้ lookup tenant ทีหลัง
+
+[sources.syslog_tcp]
+type       = "socket"
+mode       = "tcp"
+address    = "0.0.0.0:5514"
+host_key   = "collector_ip"
+
+[sources.http_ingest]
+type              = "http_server"
+address           = "0.0.0.0:8686"
+path              = "/ingest"
+method            = "POST"
+decoding.codec    = "json"
+# framing default ของ Vector คือ newline_delimited (ตัด body เป็นหลาย "เฟรม"
+# ตามตัวขึ้นบรรทัดใหม่ก่อน แล้วค่อย decode แต่ละเฟรมเป็น JSON แยกกัน — เผื่อไว้
+# สำหรับรับ NDJSON หลาย event ในคำขอเดียว) แต่ /ingest ของเราตั้งใจรับ "1 JSON
+# object ต่อ 1 คำขอ" เสมอ (ดูตัวอย่างในข้อสอบข้อ 4.3-4.7 ทุกอันเป็น object เดี่ยว)
+# ถ้าปล่อย default ไว้ พอ client ส่ง JSON แบบ pretty-print (มี \n คั่นแต่ละ
+# field เช่น Postman) Vector จะตัด body ที่ \n ตัวแรกแล้วเอาไปแค่ชิ้นแรก (เช่น
+# แค่ "{" เฉยๆ) ไป parse เป็น JSON เดี่ยวๆ พังทันทีด้วย "EOF while parsing an
+# object" ทั้งที่ JSON ทั้งก้อนถูกต้อง 100% (เจอบั๊กนี้จริงตอนทดสอบผ่าน Postman —
+# สคริปต์ post_logs.py ไม่เจอเพราะส่งเป็น JSON บรรทัดเดียว minified อยู่แล้ว)
+# แก้ด้วย framing.method = "bytes" — เอาทั้ง body มาเป็นก้อนเดียวไม่ตัดแบ่งเลย
+# ไม่กระทบ /spool/*.ndjson (sources.spool_files) เพราะเป็นคนละ source กันเลย
+framing.method    = "bytes"
+
+[sources.spool_files]
+type            = "file"
+include         = ["/spool/*.ndjson"]
+read_from       = "beginning"
+# หมายเหตุ: source ชนิด "file" ไม่มีความสามารถ decode JSON ในตัว (ต่างจาก
+# http_server/socket ที่มี decoding.codec) ได้แค่ข้อความดิบทีละบรรทัดเป็น
+# .message — ต้อง parse_json เองใน transforms/decode_spool.toml ก่อนเข้า envelope
+
+[sources.internal_metrics_source]
+type = "internal_metrics"   # ใช้เป็น input ของ sinks.toml → /metrics ทีหลัง
