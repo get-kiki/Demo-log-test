@@ -55,7 +55,7 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- เรียกทันทีตอน migrate เพื่อให้มี partition ของ "วันนี้ + 3 วันข้างหน้า" พร้อม
--- ใช้ทันที — การรันประจำวัน (ต่อจากนี้) ต้องตั้ง schedule แยกต่างหาก (pg_cron
--- หรือ cron job ภายนอกที่เรียก `SELECT maintain_logs_partitions();`) ยังไม่ได้
--- ทำส่วนนั้น ถือเป็น TODO ที่ต้องต่อกับ worker service ทีหลัง
+-- ใช้ทันที — การรันประจำวัน (ต่อจากนี้) ต่อเข้ากับ worker service แล้ว (ดู
+-- worker/src/partitions.ts) เรียกฟังก์ชันนี้ซ้ำทุก tick (ทุก 60 วินาที ตาม
+-- worker/src/main.ts) แทนที่จะพึ่ง pg_cron/cron job แยกต่างหาก
 SELECT maintain_logs_partitions();

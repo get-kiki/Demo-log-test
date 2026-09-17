@@ -1,5 +1,6 @@
 import { useAuth } from "../auth/AuthContext.tsx";
 import { useRules, useUpdateRule, useDeleteRule } from "../api/rules.ts";
+import { errorMessage } from "../api/client.ts";
 import { RuleForm } from "../components/RuleForm.tsx";
 
 function conditionSummary(condition: { action?: string; event_type_contains?: string; window_minutes: number; threshold: number; group_by: string[] }): string {
@@ -20,6 +21,15 @@ export function Rules() {
   return (
     <div className="space-y-6">
       <RuleForm tenants={user?.tenants ?? []} onCreated={refetch} />
+
+      {/* updateRule ใช้ร่วมกันทั้ง checkbox เปิด/ปิด และในอนาคตถ้ามีฟอร์มแก้ไข —
+          แสดง error ล่าสุดของ mutation ตัวไหนก็ได้ที่พังไว้ตรงนี้จุดเดียว ไม่ต้อง
+          แยกตามแถว เพราะ react-query mutation เก็บ state แค่ของการเรียกล่าสุดอยู่แล้ว */}
+      {(updateRule.isError || deleteRule.isError) && (
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {errorMessage(updateRule.error ?? deleteRule.error)}
+        </p>
+      )}
 
       <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
         <table className="w-full text-left text-sm">

@@ -124,7 +124,7 @@ $$ LANGUAGE plpgsql;
 -- เรียกทันทีเหมือน 002 เพื่อให้มี partition ของวันนี้ + N วันข้างหน้าพร้อมใช้
 -- — ตอนนี้ตาราง tenants ยังว่างเปล่า (seed.sql ตั้งใจแยกไม่ auto-run ตอน
 -- bootstrap) ผลคือรอบแรกนี้แต่ละวันจะมีแค่ logs_YYYY_MM_DD_default ยังไม่มี
--- sub-partition เฉพาะ tenant จนกว่าจะรัน seed.sql แล้วเรียก
--- `SELECT maintain_logs_partitions();` ซ้ำอีกรอบด้วยมือ (หรือรอ cron ที่ยัง
--- ไม่ได้ต่อ — TODO เดิมจาก 002 ยังค้างอยู่เหมือนกัน ครอบคลุมงานนี้ไปด้วย)
+-- sub-partition เฉพาะ tenant จนกว่าจะรัน seed.sql — ไม่ต้องเรียกซ้ำเองด้วยมือแล้ว
+-- เพราะ worker (worker/src/partitions.ts) เรียกฟังก์ชันนี้ซ้ำทุก 60 วินาทีอยู่แล้ว
+-- ภายในไม่เกิน 1 นาทีหลัง seed เสร็จ sub-partition เฉพาะ tenant จะถูกสร้างให้เอง
 SELECT maintain_logs_partitions();

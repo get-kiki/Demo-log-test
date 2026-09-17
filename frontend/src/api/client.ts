@@ -14,6 +14,17 @@ export class ApiError extends Error {
   }
 }
 
+// แปลง error จาก mutation (react-query) ให้เป็นข้อความอ่านง่ายพอโชว์ผู้ใช้ได้ตรงๆ —
+// ใช้ร่วมกันได้ทุกหน้า ไม่ต้องเขียนซ้ำ ดึง message จาก backend ErrorResponse
+// ({error, message}) ถ้ามี ไม่งั้น fallback เป็นข้อความทั่วไปตาม status/ประเภท error
+export function errorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const body = err.body as { message?: string } | undefined;
+    return body?.message ?? `เกิดข้อผิดพลาด (HTTP ${err.status})`;
+  }
+  return "เชื่อมต่อ backend ไม่สำเร็จ";
+}
+
 // เก็บ access token ไว้ในตัวแปรของ module นี้เฉยๆ (ไม่ใช่ localStorage) — หายไป
 // ทุกครั้งที่ reload หน้า ตั้งใจ: กัน XSS อ่าน token จาก localStorage ได้ตรงๆ
 // ตอนเปิดแอปใหม่ทุกครั้งต้องพึ่ง refreshSession() (ที่ใช้ httpOnly cookie) แทน

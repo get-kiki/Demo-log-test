@@ -10,7 +10,7 @@ Encrypt** จริงผ่าน ACME (ดูรายละเอียดเ
 ## 1) เตรียม Cloud VM
 
 เลือก provider อะไรก็ได้ (DigitalOcean, AWS EC2, GCP Compute Engine, Vultr,
-Azure ฯลฯ) — สร้าง VM ตามสเปกขั้นต่ำของข้อสอบ (ข้อ 5):
+Azure ฯลฯ) — สร้าง VM ตามสเปกขั้นต่ำ
 
 - Ubuntu 22.04+
 - 4 vCPU, 8 GB RAM, 40 GB disk
@@ -165,8 +165,3 @@ login ด้วยบัญชีเดโมและทดสอบ ingest ท
 ถ้าจะยิง `samples/post_logs.py` จากเครื่อง VM เองต้องแก้ `BASE_URL` ในสคริปต์
 เป็น URL จริง (ตอนนี้ hardcode เป็น `https://localhost/ingest` สำหรับทดสอบใน
 เครื่องเดียวกัน)
-
-## 8) ส่ง URL ให้กรรมการ
-
-`https://log.yourdomain.com/` คือ URL ที่ใช้ส่งมอบตามข้อสอบข้อ 6.3 — ไม่ต้อง
-เปิด VPN หรือให้สิทธิ์อะไรเพิ่ม กรรมการเข้าจากที่ไหนก็ได้ผ่าน HTTPS ปกติ

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { AlertCondition } from "@log-platform/shared";
 import { useCreateRule, useTestRule, type Channel, type TestMatch } from "../api/rules.ts";
+import { errorMessage } from "../api/client.ts";
 import { STATUS } from "../lib/colors.ts";
 
 const GROUP_BY_OPTIONS = ["src_ip", "user", "host", "event_type", "source"] as const;
@@ -177,6 +178,7 @@ export function RuleForm({ tenants, onCreated }: Props) {
 
       {testRule.data && <TestResults matches={testRule.data.matches} />}
       {testRule.isError && <p className="text-sm text-red-600">ทดสอบไม่สำเร็จ</p>}
+      {createRule.isError && <p className="text-sm text-red-600">{errorMessage(createRule.error)}</p>}
     </div>
   );
 }
